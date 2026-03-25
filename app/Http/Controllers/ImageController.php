@@ -22,42 +22,81 @@ class ImageController extends Controller
 
     public function generate(Request $request)
     {
+        // 1. Validation including new fields (Size, Image, Strength)
         $request->validate([
-            'prompt' => 'required|string|max:1000',
+            'prompt'     => 'required|string|max:1000',
+            'size'       => 'nullable|string|in:1024x1024,768x1024,1280x768', // Restrict sizes for safety
+            'init_image' => 'nullable|image|max:10240', // Max 10MB upload
+            'strength'   => 'nullable|numeric|min:0.1|max:0.9', // Creativity slider
         ]);
 
         $user = auth()->user();
 
-        // Logic:
-        // If credits >= 15: Premium (No Watermark), Deduct 10.
-        // Else: Free (Watermarked), Deduct 0.
+        // 2. Logic: Check if user qualifies for Premium features
+        // Must have at least 15 credits to trigger the "Premium" pipeline
         $isPremium = $user->credits >= 15;
 
-        try {
-            $path = $this->deepInfraService->generateImage($request->prompt);
+        // 3. Parse Size (Default to 1024x1024 if empty)
+        $sizeString = $request->input('size', '1024x1024');
+        [$width, $height] = explode('x', $sizeString);
 
-            if (!$isPremium) {
-                $this->deepInfraService->applyWatermark($path);
-            } else {
+        try {
+            // --- PREMIUM FLOW (The "T-Shirt" Pipeline) ---
+            if ($isPremium) {
+                
+                // This runs: Generate -> Remove BG -> Upscale to 4K
+                $result = $this->deepInfraService->generateTShirtDesign(
+                    $request->prompt,
+                    (int)$width,
+                    (int)$height,
+                    $request->file('init_image'), // Pass uploaded file (if any)
+                    (float)$request->input('strength', 0.7)
+                );
+
+                // Premium users get the 'final' 4K image
+                // The service returns an array: ['base' => ..., 'clean' => ..., 'final' => ...]
+                $path = $result['final'];
+
+                // Deduct 10 Credits
                 $user->decrement('credits', 10);
+
+            } 
+            // --- FREE FLOW (Standard) ---
+            else {
+                
+                // Just generate the standard image
+                $path = $this->deepInfraService->generateBaseImage(
+                    $request->prompt,
+                    (int)$width,
+                    (int)$height,
+                    $request->file('init_image'),
+                    (float)$request->input('strength', 0.7)
+                );
+
+                // Apply Watermark
+                $this->deepInfraService->applyWatermark($path);
             }
 
-            // Record generation
+            // 4. Save to Database
             $user->generatedImages()->create([
                 'prompt' => $request->prompt,
-                'image_path' => $path,
+                'image_path' => $path, // Saves the path (e.g., "generated/xyz.png")
                 'is_watermarked' => !$isPremium,
             ]);
 
             return response()->json([
                 'success' => true,
-                'image_url' => Storage::url($path),
+                'image_url' => Storage::url($path), // Returns full URL for frontend
                 'remaining_credits' => $user->fresh()->credits,
                 'is_watermarked' => !$isPremium
             ]);
 
         } catch (\Exception $e) {
-            return response()->json(['success' => false, 'error' => $e->getMessage()], 500);
+            // Log error if needed: \Log::error($e->getMessage());
+            return response()->json([
+                'success' => false, 
+                'error' => 'Generation Failed: ' . $e->getMessage()
+            ], 500);
         }
     }
 }

@@ -12,6 +12,7 @@ Route::get('/', function () {
 
 Route::middleware(['auth', 'verified'])->group(function () {
     // Generator
+    Route::get('/dashboard', [ImageController::class, 'index'])->name('dashboard');
     Route::get('/generator', [ImageController::class, 'index'])->name('generator');
     Route::post('/api/generate', [ImageController::class, 'generate'])->name('api.generate');
 
